@@ -1,0 +1,7 @@
+services:
+  server:
+    build: ./server/cpp
+    container_name: server
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
