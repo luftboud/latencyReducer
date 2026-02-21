@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="./styles.css" />
+    <title>Camera Viewer</title>
+</head>
+<body>
+    <div class="app">
+        <video id="video" autoplay playsinline muted></video>
+
+        <div class="app-controls">
+            <button id="startBtn" class="app-controls-button">Start</button>
+            <button id="stopBtn" class="app-controls-button" disabled>Stop</button>
+        </div>
+    </div>
+    <pre id="log"></pre>
+    <script src="./client.js"></script>
+</body>
+</html>
