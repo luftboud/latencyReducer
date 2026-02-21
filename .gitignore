@@ -1,0 +1,10 @@
+.DS_Store
+*.log
+logs/
+__pycache__/
+venv/
+.env/
+.venv/
+build/
+.idea/
+*.iml
