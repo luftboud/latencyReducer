@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import threading
 from typing import Optional
 
 import gi
@@ -14,7 +15,7 @@ import websockets
 
 Gst.init(None)
 
-WS_URL = "ws://localhost:8000/ws"
+WS_URL = "ws://127.0.0.1:8080"
 ROLE = "sender"
 
 def has_element(name: str) -> bool:
@@ -56,7 +57,13 @@ class WebRTCSender:
         self.webrtc: Optional[Gst.Element] = None
 
         self.glib_loop = GLib.MainLoop()
-        self.async_loop = asyncio.get_event_loop()
+        self.async_loop = asyncio.new_event_loop()
+        self._async_thread = threading.Thread(target=self._run_async_loop, daemon=True)
+        self._async_thread.start()
+
+    def _run_async_loop(self):
+        asyncio.set_event_loop(self.async_loop)
+        self.async_loop.run_forever()
 
     async def ws_send(self, payload: dict):
         assert self.ws is not None
@@ -179,7 +186,7 @@ class WebRTCSender:
                     self.add_remote_candidate(data["candidate"])
 
     def run(self):
-        asyncio.ensure_future(self.run_ws())
+        asyncio.run_coroutine_threadsafe(self.run_ws(), self.async_loop)
 
         try:
             self.glib_loop.run()
