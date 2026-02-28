@@ -3,22 +3,26 @@
 #include <boost/asio.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/core.hpp>
+#include <boost/json.hpp>
 #include <utility>
 
 #include "server.h"
 
 using boost::asio::ip::tcp;
 namespace websocket = boost::beast::websocket;
+namespace json = boost::json;
 
 static std::mutex m;
 
 void server_t::log_participants(const std::string& buf, websocket_type socket) {
     std::lock_guard<std::mutex> lock(m);
-    if (buf.find(R"({"type": "join", "role": "sender"})") != std::string::npos) {
+    json::value json_content = json::parse(buf);
+    auto role = json_content.as_object()["role"].as_string();
+    if (role == "sender") {
         sender.set_ws(socket);
         std::cout << "Sender is logged" << std::endl;
     }
-    else if (buf.find(R"({"type": "join", "role": "viewer"})") != std::string::npos) {
+    else if (role == "viewer") {
         viewer.set_ws(socket);
         std::cout << "Viewer is logged" << std::endl;
     }
