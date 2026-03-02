@@ -10,8 +10,8 @@ add_executable(${PROJECT_NAME}
         src/server.cpp
 )
 
-find_package(Boost 1.72 REQUIRED COMPONENTS system)
+find_package(Boost 1.72 REQUIRED COMPONENTS system json)
 target_include_directories(${PROJECT_NAME} PRIVATE ${Boost_INCLUDE_DIR})
-target_link_libraries(${PROJECT_NAME} PRIVATE Boost::system)
+target_link_libraries(${PROJECT_NAME} PRIVATE Boost::system Boost::json)
 
 target_include_directories(${PROJECT_NAME} PRIVATE include)

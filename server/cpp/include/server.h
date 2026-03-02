@@ -25,6 +25,8 @@ public:
 
     void set_ws(websocket_type websocket_stream) { ws = std::move(websocket_stream); }
 
+    [[nodiscard]] websocket_type get_ws() { return ws; }
+
     bool empty() const { return !ws; }
 
     ~socket_t() = default;
@@ -41,11 +43,13 @@ public:
     explicit server_t(std::string addr, int port): addr(addr), port(port) {}
 
     void launch();
-    void log_participants(const std::string& buf, websocket_type socket);
+    std::string log_participants(const std::string& buf, websocket_type socket);
 
     bool everybody() const { return !(sender.empty() || viewer.empty()); }
     [[nodiscard]] socket_t& get_sender() { return sender; }
     [[nodiscard]] socket_t& get_viewer() { return viewer; }
+
+    void delete_socket(const std::string& role);
 };
 
 #endif //SERVER_SERVER_H
