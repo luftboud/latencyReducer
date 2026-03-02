@@ -43,6 +43,8 @@ class WebRTCSender:
 
         remote_description_set - to know if program have received SDP answer
         pending_remote_candidates - buffer for ICE candidates
+
+        _offer_started - so negotiation doesn't start until webrtc linked
         """
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.pipeline: Optional[Gst.Pipeline] = None
@@ -59,6 +61,8 @@ class WebRTCSender:
 
         self.remote_description_set = False
         self.pending_remote_candidates = []
+
+        self._offer_started = False
 
     def _run_async_loop(self):
         """
@@ -78,6 +82,13 @@ class WebRTCSender:
     # ---------- webrtc callbacks ----------
 
     def _on_negotiation_needed(self, element: Gst.Element):
+        if not self._linked_to_webrtc:
+            print("[sender] negotiation-needed but not linked yet -> ignore, will negotiate after link")
+            return
+        if self._offer_started:
+            return
+
+        self._offer_started = True
         print("[sender] on-negotiation-needed -> create-offer")
         promise = Gst.Promise.new_with_change_func(self._on_offer_created, element, None)
         element.emit("create-offer", None, promise)
@@ -264,7 +275,7 @@ class WebRTCSender:
         bus.connect("message", self._on_bus_message)
 
         # IMPORTANT: async link queue -> webrtc sink pad (pads may appear later)
-        GLib.idle_add(self._try_link_queue_to_webrtc)
+        GLib.timeout_add(50, self._try_link_queue_to_webrtc)
 
     def _try_link_queue_to_webrtc(self):
         if self._linked_to_webrtc:
@@ -291,6 +302,14 @@ class WebRTCSender:
             self._linked_to_webrtc = True
             print("[sender] queue linked to webrtc; switching pipeline to PLAYING")
             self.pipeline.set_state(Gst.State.PLAYING)
+
+            # kick negotiation now (in case negotiation-needed fired earlier)
+            if not self._offer_started:
+                print("[sender] starting offer after link")
+                self._offer_started = True
+                promise = Gst.Promise.new_with_change_func(self._on_offer_created, self.webrtc, None)
+                self.webrtc.emit("create-offer", None, promise)
+
             return False
 
         return True
