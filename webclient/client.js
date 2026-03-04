@@ -11,6 +11,7 @@ let websocketSignal
 let peerConnection
 let videoControlsStart = false
 let pendingRemoteCandidates = []
+let statsTimer
 
 function log(...args) { 
   /*
@@ -55,7 +56,11 @@ function createPeerConnection() {
   peerConnection.onconnectionstatechange = () => {
     log("connectionState =", peerConnection.connectionState)
 
-    if (peerConnection.connectionState === "failed") {
+    if (peerConnection.connectionState === "connected"){
+      if (statsTimer) clearInterval(statsTimer);
+      statsTimer = setInterval(getStats, 6000);       
+      getStats();
+    } else if (peerConnection.connectionState === "failed") {
       log("Connection failed, restarting...")
       stop()
     }
@@ -200,6 +205,38 @@ function connectWebSocket() {
   })
 }
 
+async function getStats(){
+  const stats = await peerConnection.getStats();
+  stats.forEach(report => {
+      if (report.type == "candidate-pair"){
+        if (report.state == "succeeded"){
+          console.log("Candidate-pair report statistics:")
+          const currRoundTripTime = report.currentRoundTripTime * 1000
+          const bytesReceived = report.bytesReceived
+
+          console.log(` Time spent on sending request & receiving information back: ${currRoundTripTime} ms \n Bytes received: ${bytesReceived}`)
+        }
+      } else if (report.type == "inbound-rtp"){
+        if (report.kind == "video") {
+          console.log("Received video report statistics:")
+          let packetsLost = report.packetsLost
+          let framesPerSecond = report.framesPerSecond
+          let framesDropped = report.framesDropped
+          let framesDecoded = report.framesDecoded
+          
+          let bufferDelay = report.jitterBufferDelay * 1000
+          let bufferMinDelay = report.jitterBufferMinimumDelay * 1000
+          let totalDecodeTime = report.totalDecodeTime * 1000
+          
+          let frameDecodeTime = framesDecoded > 0 ? (totalDecodeTime / framesDecoded) : 0
+          let avgBufferDelay = framesDecoded > 0 ? (bufferDelay / framesDecoded) : 0
+
+          console.log(` Frames per second: ${framesPerSecond} \n Number of lost packets: ${packetsLost} \n Number of dropped frames: ${framesDropped} \n Number of all decoded frames: ${framesDecoded} \n Awaiting of a buffer to make a complete video: ${bufferDelay.toFixed(2)} ms \n Average buffer delay per frame: ${avgBufferDelay.toFixed(2)} ms \n The smallest delay of a buffer making video: ${bufferMinDelay.toFixed(2)} ms \n Total time taken for decoding: ${totalDecodeTime.toFixed(2)} ms \n Time taken for decoding 1 frame: ${frameDecodeTime.toFixed(2)} ms`)
+        }
+  }});
+}
+
+
 function start() {
   if (videoControlsStart) return
   videoControlsStart = true;
@@ -229,10 +266,15 @@ function stop() {
     websocketSignal = null
     log("WebSocket closed (requested)")
   }
+
+  if(statsTimer){
+    clearInterval(statsInterval)
+    statsInterval = null
+    log("Stopped saving statistics")
+  }
 }
 
 startBtn.addEventListener("click", start)
 stopBtn.addEventListener("click", stop)
 
 controlsStarter(false)
-log("client.js loaded and ready")
