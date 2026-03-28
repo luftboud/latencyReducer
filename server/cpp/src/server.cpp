@@ -14,6 +14,8 @@ namespace json = boost::json;
 
 static std::mutex m;
 
+constexpr std::string ASK_OFFER = R"({"type":"send_offer"})";
+
 std::string server_t::log_participants(const std::string& buf, websocket_type socket) {
     std::lock_guard<std::mutex> lock(m);
     json::value json_content = json::parse(buf);
@@ -62,10 +64,10 @@ void client_worker(websocket_type ws, server_t* server) {
 
             if (msg_type == "join") {
                 curr_role = server->log_participants(msg, ws);
-                if (!server->everybody() && curr_role == "sender") {
+                if (server->everybody()) {
                     websocket_type sender = server->get_sender().get_ws();
                     sender->text(true);
-                    sender->write(boost::asio::buffer("{send_offer}"));
+                    sender->write(boost::asio::buffer(ASK_OFFER));
                 }
                 continue;
             }
