@@ -63,6 +63,7 @@ class WebRTCSender:
         self.pending_remote_candidates = []
 
         self._offer_started = False
+        self._link_timer_id = None
 
     def _run_async_loop(self):
         """
@@ -76,23 +77,15 @@ class WebRTCSender:
         """
         Asynchronously sends data t osignaling server
         """
-        assert self.ws is not None
-        await self.ws.send(json.dumps(payload))
+        if self.ws is None:
+            print("[sender] ws_send called but websocket is None", file=sys.stderr)
+            return
+        try:
+            await self.ws.send(json.dumps(payload))
+        except Exception as e:
+            print(f"[sender] failed to send WS message: {e}", file=sys.stderr)
 
     # ---------- webrtc callbacks ----------
-
-    def _on_negotiation_needed(self, element: Gst.Element):
-        if not self._linked_to_webrtc:
-            print("[sender] negotiation-needed but not linked yet -> ignore, will negotiate after link")
-            return
-        if self._offer_started:
-            return
-
-        self._offer_started = True
-        print("[sender] on-negotiation-needed -> create-offer")
-        promise = Gst.Promise.new_with_change_func(self._on_offer_created, element, None)
-        element.emit("create-offer", None, promise)
-
     def _on_offer_created(self, promise: Gst.Promise, element: Gst.Element, _):
         reply = promise.get_reply()
         offer = reply.get_value("offer")
@@ -120,7 +113,9 @@ class WebRTCSender:
     # ---------- Remote updates from signaling ----------
 
     def set_remote_answer(self, sdp_text: str):
-        assert self.webrtc is not None
+        if self.webrtc is None:
+            print("[sender] got remote answer but webrtc is not ready", file=sys.stderr)
+            return
 
         res, sdpmsg = GstSdp.SDPMessage.new()
         if res != GstSdp.SDPResult.OK:
@@ -144,7 +139,9 @@ class WebRTCSender:
         self.pending_remote_candidates.clear()
 
     def add_remote_candidate(self, cand_obj: dict):
-        assert self.webrtc is not None
+        if self.webrtc is None:
+            print("[sender] got remote answer but webrtc is not ready", file=sys.stderr)
+            return
         if not self.remote_description_set:
             print("[sender] buffering remote ICE (remote description not set yet)")
             self.pending_remote_candidates.append(cand_obj)
@@ -264,9 +261,7 @@ class WebRTCSender:
         # store queue for async-link
         self._q = q
         self._linked_to_webrtc = False
-
         # connect signals
-        self.webrtc.connect("on-negotiation-needed", self._on_negotiation_needed)
         self.webrtc.connect("on-ice-candidate", self._on_ice_candidate)
 
         # bus watcher
@@ -275,7 +270,7 @@ class WebRTCSender:
         bus.connect("message", self._on_bus_message)
 
         # IMPORTANT: async link queue -> webrtc sink pad (pads may appear later)
-        GLib.timeout_add(50, self._try_link_queue_to_webrtc)
+        self._link_timer_id = GLib.timeout_add(50, self._try_link_queue_to_webrtc)
 
     def _try_link_queue_to_webrtc(self):
         if self._linked_to_webrtc:
@@ -290,7 +285,7 @@ class WebRTCSender:
             return True
 
 
-        webrtc_sink = self.webrtc.get_request_pad("sink_%u")
+        webrtc_sink = self.webrtc.request_pad_simple("sink_%u")
         if not webrtc_sink:
             print("[sender] idle: could not request webrtc sink pad yet")
             return True
@@ -330,6 +325,37 @@ class WebRTCSender:
                 old, new, pending = msg.parse_state_changed()
                 print(f"[sender] pipeline state: {old.value_nick} -> {new.value_nick}")
 
+    def _reset_webrtc_state(self):
+        self.remote_description_set = False
+        self.pending_remote_candidates.clear()
+        self._offer_started = False
+        self._linked_to_webrtc = False
+        self._q = None
+        self.webrtc = None
+
+    def _destroy_pipeline(self):
+        if self.pipeline:
+            try:
+                bus = self.pipeline.get_bus()
+                if bus:
+                    bus.remove_signal_watch()
+            except Exception:
+                pass
+
+            if self._link_timer_id is not None:
+                GLib.source_remove(self._link_timer_id)
+                self._link_timer_id = None
+
+            self.pipeline.set_state(Gst.State.NULL)
+            self.pipeline = None
+
+    def restart_for_new_viewer(self):
+        print("[sender] restarting sender state for new viewer")
+        self._destroy_pipeline()
+        self._reset_webrtc_state()
+        self.build_pipeline()
+        self.start_pipeline()
+
     def start_pipeline(self):
         assert self.pipeline is not None
         self.pipeline.set_state(Gst.State.PAUSED)
@@ -342,9 +368,13 @@ class WebRTCSender:
         try:
             if self.pipeline:
                 self.pipeline.set_state(Gst.State.NULL)
+                self.pipeline = None
         finally:
             if self.glib_loop.is_running():
                 self.glib_loop.quit()
+
+            if self.async_loop.is_running():
+                self.async_loop.call_soon_threadsafe(self.async_loop.stop)
 
     # ---------- Main run ----------
 
@@ -372,11 +402,14 @@ class WebRTCSender:
                 await self.ws_send({"type": "join", "role": ROLE})
                 print("[sender] joined signaling as sender")
 
-                self.build_pipeline()
-                self.start_pipeline()
-
                 async for raw in ws:
                     data = json.loads(raw)
+
+                    if data.get("type") == "send_offer":
+                        print("[sender] got send_offer from server")
+                        self.restart_for_new_viewer()
+                        continue
+
                     if data.get("type") == "answer":
                         self.set_remote_answer(data["sdp"])
                     elif data.get("type") == "candidate":
