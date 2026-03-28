@@ -57,37 +57,38 @@ void client_worker(websocket_type ws, server_t* server) {
             std::string msg = boost::beast::buffers_to_string(buff.data());
             std::cout << msg << std::endl;
 
-            if (!server->everybody()) {
+            json::value json_content = json::parse(msg).as_object();
+            std::string msg_type = json_content.as_object()["type"].as_string().c_str();
+
+            if (msg_type == "join") {
                 curr_role = server->log_participants(msg, ws);
+                if (!server->everybody() && curr_role == "sender") {
+                    websocket_type sender = server->get_sender().get_ws();
+                    sender->text(true);
+                    sender->write(boost::asio::buffer("{send_offer}"));
+                }
                 continue;
             }
 
-            if (curr_role == "sender") {
-                websocket_type sender = server->get_sender().get_ws();
-                sender->text(true);
-                sender->write(boost::asio::buffer("{send_offer}"));
-            }
-
-            json::value json_content = json::parse(msg);
-            if (json_content.as_object()["type"].as_string() == "offer") {
+            if (msg_type == "offer") {
                 websocket_type viewer = server->get_viewer().get_ws();
                 viewer->text(true);
                 viewer->write(boost::asio::buffer(msg));
             }
 
-            else if (json_content.as_object()["type"].as_string() == "answer") {
+            else if (msg_type == "answer") {
                 websocket_type sender = server->get_sender().get_ws();
                 sender->text(true);
                 sender->write(boost::asio::buffer(msg));
             }
 
-            else if (curr_role == "viewer" && json_content.as_object()["type"].as_string() == "candidate") {
+            else if (curr_role == "viewer" && msg_type == "candidate") {
                 websocket_type sender = server->get_sender().get_ws();
                 sender->text(true);
                 sender->write(boost::asio::buffer(msg));
             }
 
-            else if (curr_role == "sender" && json_content.as_object()["type"].as_string() == "candidate") {
+            else if (curr_role == "sender" && msg_type == "candidate") {
                 websocket_type viewer = server->get_viewer().get_ws();
                 viewer->text(true);
                 viewer->write(boost::asio::buffer(msg));
