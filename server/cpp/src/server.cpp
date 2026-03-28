@@ -38,13 +38,9 @@ std::string server_t::log_participants(const std::string& buf, websocket_type so
 
 void server_t::delete_socket(const std::string &role) {
     std::lock_guard<std::mutex> lock(m);
-    boost::system::error_code ec;
     if (role == "sender") {
-        sender.get_ws()->close(websocket::close_code::normal, ec);
         sender.set_ws(nullptr);
-    }
-    else if (role == "viewer") {
-        viewer.get_ws()->close(websocket::close_code::normal, ec);
+    } else if (role == "viewer") {
         viewer.set_ws(nullptr);
     }
 }
@@ -64,6 +60,12 @@ void client_worker(websocket_type ws, server_t* server) {
             if (!server->everybody()) {
                 curr_role = server->log_participants(msg, ws);
                 continue;
+            }
+
+            if (curr_role == "sender") {
+                websocket_type sender = server->get_sender().get_ws();
+                sender->text(true);
+                sender->write(boost::asio::buffer("{send_offer}"));
             }
 
             json::value json_content = json::parse(msg);
