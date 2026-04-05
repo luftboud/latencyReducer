@@ -20,13 +20,6 @@ ROLE = "sender"
 def has_element(name: str) -> bool:
     return Gst.ElementFactory.find(name) is not None
 
-USE_X264 = has_element("x264enc")
-USE_VTENC = has_element("vtenc_h264")
-
-if not (USE_X264 or USE_VTENC):
-    print("ERROR: No H.264 encoder found (x264enc/vtenc_h264). Check GStreamer install.", file=sys.stderr)
-    sys.exit(1)
-
 class WebRTCSender:
     def __init__(self):
         """
@@ -153,54 +146,60 @@ class WebRTCSender:
 
     # ---------- Pipeline ----------
 
+    def _on_rtsp_pad_added(self, src: Gst.Element, pad: Gst.Pad, depay: Gst.Element):
+        """
+        rtspsrc creates pads dynamically.
+        Waits for video RTP pad and then link it to rtph264depay.
+        """
+        caps = pad.get_current_caps()
+        if not caps:
+            caps = pad.query_caps(None)
+        caps_str = caps.to_string() if caps else ""
+        print(f"[sender] rtspsrc pad-added: {caps_str}")
+
+        # H.264 RTP video
+        if "application/x-rtp" not in caps_str or "media=(string)video" not in caps_str:
+            print("[sender] ignoring non-video RTP pad")
+            return
+
+        sink_pad = depay.get_static_pad("sink")
+        if not sink_pad:
+            print("[sender] ERROR: depay sink pad not found", file=sys.stderr)
+            return
+
+        if sink_pad.is_linked():
+            print("[sender] depay sink already linked")
+            return
+
+        res = pad.link(sink_pad)
+        print(f"[sender] rtsp src pad -> depay: {res.value_nick}")
+
     def build_pipeline(self):
         """
         Building video pipeline that will be sent to signaling server.
         """
-        # ---- choosing encoder ----
-        encoder_name = "x264enc" if USE_X264 else "vtenc_h264"
-        print(f"[sender] building pipeline (async link queue -> webrtc sink pad, encoder={encoder_name})")
+        RTSP_URL = (
+            "rtsp://admin:iloveacs2026@192.168.1.150:554/cam/realmonitor?channel=1&subtype=1"
+        )
+        print("[sender] building RTSP -> WebRTC pipeline")
 
         # ---- creating pipeline container ----
         self.pipeline = Gst.Pipeline.new("pipe")
         if not self.pipeline:
             raise RuntimeError("Failed to create Gst.Pipeline")
 
-        # ---- creating elements of test video ----
-        src = Gst.ElementFactory.make("videotestsrc", "src")
-        conv1 = Gst.ElementFactory.make("videoconvert", "conv1")
-        overlay = Gst.ElementFactory.make("clockoverlay", "overlay")
-        conv2 = Gst.ElementFactory.make("videoconvert", "conv2")
-        scale = Gst.ElementFactory.make("videoscale", "scale")
+        # ---- source from Dahua camera ----
+        src = Gst.ElementFactory.make("rtspsrc", "src")
+        if not src:
+            raise RuntimeError("Failed to create rtspsrc (check gst-plugins-good).")
+        src.set_property("location", RTSP_URL)
+        src.set_property("latency", 100)
+        src.set_property("protocols", "tcp")
 
-        # ---- setting parameters of previously created elements ----
-        rawcaps = Gst.ElementFactory.make("capsfilter", "rawcaps")
-        rawcaps.set_property("caps", Gst.Caps.from_string(
-            "video/x-raw,format=I420,width=1280,height=720,framerate=30/1"
-        ))
-
-        if not all([src, conv1, overlay, conv2, scale, rawcaps]):
-            raise RuntimeError("Failed to create raw video elements (check plugins).")
-
-        src.set_property("is-live", True)
-        src.set_property("pattern", "smpte")
-        overlay.set_property("time-format", "%H:%M:%S")
-
-        # ---- encoding ----
-        if USE_X264:
-            enc = Gst.ElementFactory.make("x264enc", "enc")
-            if not enc:
-                raise RuntimeError("Failed to create x264enc")
-            enc.set_property("tune", "zerolatency") # minimising buffering
-            enc.set_property("speed-preset", "ultrafast") # minimum CPU
-            enc.set_property("key-int-max", 30) # approx 30fps
-            enc.set_property("bitrate", 1500) # aim for bitrate
-        else:
-            enc = Gst.ElementFactory.make("vtenc_h264", "enc")
-            if not enc:
-                raise RuntimeError("Failed to create vtenc_h264")
-            enc.set_property("realtime", True) # low latency regime
-            enc.set_property("allow-frame-reordering", False) # no B-frames
+        # ---- remove RTP container from RTSP video ----
+        depay = Gst.ElementFactory.make("rtph264depay", "depay")
+        if not depay:
+            raise RuntimeError("Failed to create rtph264depay")
 
         h264parse = Gst.ElementFactory.make("h264parse", "h264parse")
         if not h264parse:
@@ -238,7 +237,7 @@ class WebRTCSender:
         self.webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
 
         # ---- add to pipeline ----
-        for e in (src, conv1, overlay, conv2, scale, rawcaps, enc, h264parse, pay, rtpcaps, q, self.webrtc):
+        for e in (src, depay, h264parse, pay, rtpcaps, q, self.webrtc):
             if not e:
                 raise RuntimeError("Failed to create GStreamer element (check plugins).")
             self.pipeline.add(e)
@@ -250,13 +249,7 @@ class WebRTCSender:
             if not ok:
                 raise RuntimeError(f"Failed link: {label}")
 
-        must_link(src, conv1, "src->conv1")
-        must_link(conv1, overlay, "conv1->overlay")
-        must_link(overlay, conv2, "overlay->conv2")
-        must_link(conv2, scale, "conv2->scale")
-        must_link(scale, rawcaps, "scale->rawcaps")
-        must_link(rawcaps, enc, "rawcaps->enc")
-        must_link(enc, h264parse, "enc->h264parse")
+        must_link(depay, h264parse, "depay->h264parse")
         must_link(h264parse, pay, "h264parse->pay")
         must_link(pay, rtpcaps, "pay->rtpcaps")
         must_link(rtpcaps, q, "rtpcaps->queue")
@@ -264,6 +257,9 @@ class WebRTCSender:
         # store queue for async-link
         self._q = q
         self._linked_to_webrtc = False
+
+        # rtspsrc has dynamic pads -> connect callback
+        src.connect("pad-added", self._on_rtsp_pad_added, depay)
 
         # connect signals
         self.webrtc.connect("on-negotiation-needed", self._on_negotiation_needed)

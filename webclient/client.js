@@ -241,6 +241,7 @@ function start() {
   if (videoControlsStart) return
   videoControlsStart = true;
   controlsStarter(true)
+  pendingRemoteCandidates = []
   log("START clicked")
   createPeerConnection()
   connectWebSocket()
@@ -251,11 +252,21 @@ function stop() {
   videoControlsStart = false
   controlsStarter(false)
   log("STOP clicked")
+
+  if (statsTimer) {
+    clearInterval(statsTimer)
+    statsTimer = null
+    log("Stopped saving statistics")
+  }
+
   videoElement.srcObject = null
+  pendingRemoteCandidates = []
 
   if (peerConnection) {
     peerConnection.ontrack = null
     peerConnection.onicecandidate = null
+    peerConnection.onconnectionstatechange = null
+    peerConnection.oniceconnectionstatechange = null
     peerConnection.close()
     peerConnection = null
     log("RTCPeerConnection closed")
@@ -268,8 +279,8 @@ function stop() {
   }
 
   if(statsTimer){
-    clearInterval(statsInterval)
-    statsInterval = null
+    clearInterval(statsTimer)
+    statsTimer = null
     log("Stopped saving statistics")
   }
 }
