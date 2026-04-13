@@ -14,7 +14,8 @@ import websockets
 
 Gst.init(None)
 
-WS_URL = "ws://127.0.0.1:8080"
+IP = input("Enter IP: ").strip()
+WS_URL = "ws://" + IP
 ROLE = "sender"
 
 def has_element(name: str) -> bool:
@@ -91,7 +92,7 @@ class WebRTCSender:
             self.async_loop
         )
 
-    def _on_ice_candidate(self, element: Gst.Element, mlineindex: int, candidate: str):
+    def _on_ice_candidate(self, mlineindex: int, candidate: str):
         if not candidate:
             print("[sender] ICE gathering finished (empty candidate) – ignoring")
             return
@@ -305,7 +306,7 @@ class WebRTCSender:
             return False
 
         return True
-    def _on_bus_message(self, bus: Gst.Bus, msg: Gst.Message):
+    def _on_bus_message(self, msg: Gst.Message):
         """
         To get messages on the certain bus
         """

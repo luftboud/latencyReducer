@@ -25,10 +25,36 @@
   position: relative;
   padding: 14px 16px;
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   background: linear-gradient(to bottom, rgba(0,0,0,0.65), rgba(0,0,0,0));
+}
+
+.app-input{
+  margin-bottom: 20px;
+  text-decoration: none;
+  overflow: hidden;
+  border: 1px solid #808080;
+  padding: 10px 15px;
+  border-radius: 15px;
+  width: 320px;
+  color: #ffffff;
+  background: rgba(255,255,255,0.16);
+  outline: 1px solid rgba(255,255,255,0.22);
+}
+.app-controls-ip{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.app-controls-btns{
+  display: none;
+  flex-direction: row;
+  justify-content: space-between;
+  background: none;
 }
 
 .app-controls-button{
@@ -46,6 +72,15 @@
 .app-controls-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.app-controls-error{
+  font-family: Helvetica, serif;
+  color: #ffffff;
+  font-size: 17px;
+  margin-top: 20px;
+  text-align: center;
+  margin-left: 14px;
 }
 
 #log {
