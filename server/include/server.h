@@ -21,27 +21,17 @@ class server_t {
     std::mutex m;
 public:
     server_t() = default;
-    explicit server_t(std::string addr, int port): addr(addr), port(port) {}
+    explicit server_t(std::string&& addr, int port): addr(std::move(addr)), port(port) {}
 
     void launch();
-    std::string log_participants(const std::string& buf, websocket_type socket);
+    std::string log_participants(const std::string& buf, const websocket_type &socket);
 
-    bool everybody() {
+    std::pair<websocket_type, websocket_type> get_sockets() {
         std::lock_guard<std::mutex> lock(m);
-        return !(sender.empty() || viewer.empty());
+        return {sender.get_ws(), viewer.get_ws()};
     }
 
-    socket_t& get_sender() {
-        std::lock_guard<std::mutex> lock(m);
-        return sender;
-    }
-
-    socket_t& get_viewer() {
-        std::lock_guard<std::mutex> lock(m);
-        return viewer;
-    }
-
-    void delete_socket(const std::string& role);
+    void delete_socket(const std::string& role, const websocket_type &socket);
 };
 
 #endif //SERVER_SERVER_H

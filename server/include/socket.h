@@ -26,8 +26,6 @@ public:
 
     [[nodiscard]] websocket_type get_ws() { return ws; }
 
-    bool empty() const { return !ws; }
-
     ~socket_t() = default;
 };
 
