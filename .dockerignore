@@ -1,2 +1,2 @@
-server/cpp/build
-cmake-build-debug
+server/build
+server/cmake-build-debug
