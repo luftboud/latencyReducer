@@ -54,6 +54,7 @@
   display: none;
   flex-direction: row;
   justify-content: space-between;
+  background: none;
 }
 
 .app-controls-button{

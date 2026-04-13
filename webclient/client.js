@@ -183,6 +183,7 @@ function connectWebSocket() {
       JSON.stringify({
         type: "join",
         role: "viewer",
+        ipUrl: URL
       }),
     );
 
