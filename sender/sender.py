@@ -21,13 +21,6 @@ ROLE = "sender"
 def has_element(name: str) -> bool:
     return Gst.ElementFactory.find(name) is not None
 
-USE_X264 = has_element("x264enc")
-USE_VTENC = has_element("vtenc_h264")
-
-if not (USE_X264 or USE_VTENC):
-    print("ERROR: No H.264 encoder found (x264enc/vtenc_h264). Check GStreamer install.", file=sys.stderr)
-    sys.exit(1)
-
 class WebRTCSender:
     def __init__(self):
         """
@@ -64,6 +57,7 @@ class WebRTCSender:
         self.pending_remote_candidates = []
 
         self._offer_started = False
+        self._link_timer_id = None
 
     def _run_async_loop(self):
         """
@@ -77,23 +71,15 @@ class WebRTCSender:
         """
         Asynchronously sends data t osignaling server
         """
-        assert self.ws is not None
-        await self.ws.send(json.dumps(payload))
+        if self.ws is None:
+            print("[sender] ws_send called but websocket is None", file=sys.stderr)
+            return
+        try:
+            await self.ws.send(json.dumps(payload))
+        except Exception as e:
+            print(f"[sender] failed to send WS message: {e}", file=sys.stderr)
 
     # ---------- webrtc callbacks ----------
-
-    def _on_negotiation_needed(self, element: Gst.Element):
-        if not self._linked_to_webrtc:
-            print("[sender] negotiation-needed but not linked yet -> ignore, will negotiate after link")
-            return
-        if self._offer_started:
-            return
-
-        self._offer_started = True
-        print("[sender] on-negotiation-needed -> create-offer")
-        promise = Gst.Promise.new_with_change_func(self._on_offer_created, element, None)
-        element.emit("create-offer", None, promise)
-
     def _on_offer_created(self, promise: Gst.Promise, element: Gst.Element, _):
         reply = promise.get_reply()
         offer = reply.get_value("offer")
@@ -121,7 +107,9 @@ class WebRTCSender:
     # ---------- Remote updates from signaling ----------
 
     def set_remote_answer(self, sdp_text: str):
-        assert self.webrtc is not None
+        if self.webrtc is None:
+            print("[sender] got remote answer but webrtc is not ready", file=sys.stderr)
+            return
 
         res, sdpmsg = GstSdp.SDPMessage.new()
         if res != GstSdp.SDPResult.OK:
@@ -145,7 +133,9 @@ class WebRTCSender:
         self.pending_remote_candidates.clear()
 
     def add_remote_candidate(self, cand_obj: dict):
-        assert self.webrtc is not None
+        if self.webrtc is None:
+            print("[sender] got remote answer but webrtc is not ready", file=sys.stderr)
+            return
         if not self.remote_description_set:
             print("[sender] buffering remote ICE (remote description not set yet)")
             self.pending_remote_candidates.append(cand_obj)
@@ -154,54 +144,60 @@ class WebRTCSender:
 
     # ---------- Pipeline ----------
 
+    def _on_rtsp_pad_added(self, src: Gst.Element, pad: Gst.Pad, depay: Gst.Element):
+        """
+        rtspsrc creates pads dynamically.
+        Waits for video RTP pad and then link it to rtph264depay.
+        """
+        caps = pad.get_current_caps()
+        if not caps:
+            caps = pad.query_caps(None)
+        caps_str = caps.to_string() if caps else ""
+        print(f"[sender] rtspsrc pad-added: {caps_str}")
+
+        # H.264 RTP video
+        if "application/x-rtp" not in caps_str or "media=(string)video" not in caps_str:
+            print("[sender] ignoring non-video RTP pad")
+            return
+
+        sink_pad = depay.get_static_pad("sink")
+        if not sink_pad:
+            print("[sender] ERROR: depay sink pad not found", file=sys.stderr)
+            return
+
+        if sink_pad.is_linked():
+            print("[sender] depay sink already linked")
+            return
+
+        res = pad.link(sink_pad)
+        print(f"[sender] rtsp src pad -> depay: {res.value_nick}")
+
     def build_pipeline(self):
         """
         Building video pipeline that will be sent to signaling server.
         """
-        # ---- choosing encoder ----
-        encoder_name = "x264enc" if USE_X264 else "vtenc_h264"
-        print(f"[sender] building pipeline (async link queue -> webrtc sink pad, encoder={encoder_name})")
+        RTSP_URL = (
+            "rtsp://admin:iloveacs2026@192.168.1.150:554/cam/realmonitor?channel=1&subtype=1"
+        )
+        print("[sender] building RTSP -> WebRTC pipeline")
 
         # ---- creating pipeline container ----
         self.pipeline = Gst.Pipeline.new("pipe")
         if not self.pipeline:
             raise RuntimeError("Failed to create Gst.Pipeline")
 
-        # ---- creating elements of test video ----
-        src = Gst.ElementFactory.make("videotestsrc", "src")
-        conv1 = Gst.ElementFactory.make("videoconvert", "conv1")
-        overlay = Gst.ElementFactory.make("clockoverlay", "overlay")
-        conv2 = Gst.ElementFactory.make("videoconvert", "conv2")
-        scale = Gst.ElementFactory.make("videoscale", "scale")
+        # ---- source from Dahua camera ----
+        src = Gst.ElementFactory.make("rtspsrc", "src")
+        if not src:
+            raise RuntimeError("Failed to create rtspsrc (check gst-plugins-good).")
+        src.set_property("location", RTSP_URL)
+        src.set_property("latency", 100)
+        src.set_property("protocols", "tcp")
 
-        # ---- setting parameters of previously created elements ----
-        rawcaps = Gst.ElementFactory.make("capsfilter", "rawcaps")
-        rawcaps.set_property("caps", Gst.Caps.from_string(
-            "video/x-raw,format=I420,width=1280,height=720,framerate=30/1"
-        ))
-
-        if not all([src, conv1, overlay, conv2, scale, rawcaps]):
-            raise RuntimeError("Failed to create raw video elements (check plugins).")
-
-        src.set_property("is-live", True)
-        src.set_property("pattern", "smpte")
-        overlay.set_property("time-format", "%H:%M:%S")
-
-        # ---- encoding ----
-        if USE_X264:
-            enc = Gst.ElementFactory.make("x264enc", "enc")
-            if not enc:
-                raise RuntimeError("Failed to create x264enc")
-            enc.set_property("tune", "zerolatency") # minimising buffering
-            enc.set_property("speed-preset", "ultrafast") # minimum CPU
-            enc.set_property("key-int-max", 30) # approx 30fps
-            enc.set_property("bitrate", 1500) # aim for bitrate
-        else:
-            enc = Gst.ElementFactory.make("vtenc_h264", "enc")
-            if not enc:
-                raise RuntimeError("Failed to create vtenc_h264")
-            enc.set_property("realtime", True) # low latency regime
-            enc.set_property("allow-frame-reordering", False) # no B-frames
+        # ---- remove RTP container from RTSP video ----
+        depay = Gst.ElementFactory.make("rtph264depay", "depay")
+        if not depay:
+            raise RuntimeError("Failed to create rtph264depay")
 
         h264parse = Gst.ElementFactory.make("h264parse", "h264parse")
         if not h264parse:
@@ -239,7 +235,7 @@ class WebRTCSender:
         self.webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
 
         # ---- add to pipeline ----
-        for e in (src, conv1, overlay, conv2, scale, rawcaps, enc, h264parse, pay, rtpcaps, q, self.webrtc):
+        for e in (src, depay, h264parse, pay, rtpcaps, q, self.webrtc):
             if not e:
                 raise RuntimeError("Failed to create GStreamer element (check plugins).")
             self.pipeline.add(e)
@@ -251,13 +247,7 @@ class WebRTCSender:
             if not ok:
                 raise RuntimeError(f"Failed link: {label}")
 
-        must_link(src, conv1, "src->conv1")
-        must_link(conv1, overlay, "conv1->overlay")
-        must_link(overlay, conv2, "overlay->conv2")
-        must_link(conv2, scale, "conv2->scale")
-        must_link(scale, rawcaps, "scale->rawcaps")
-        must_link(rawcaps, enc, "rawcaps->enc")
-        must_link(enc, h264parse, "enc->h264parse")
+        must_link(depay, h264parse, "depay->h264parse")
         must_link(h264parse, pay, "h264parse->pay")
         must_link(pay, rtpcaps, "pay->rtpcaps")
         must_link(rtpcaps, q, "rtpcaps->queue")
@@ -266,8 +256,10 @@ class WebRTCSender:
         self._q = q
         self._linked_to_webrtc = False
 
+        # rtspsrc has dynamic pads -> connect callback
+        src.connect("pad-added", self._on_rtsp_pad_added, depay)
+
         # connect signals
-        self.webrtc.connect("on-negotiation-needed", self._on_negotiation_needed)
         self.webrtc.connect("on-ice-candidate", self._on_ice_candidate)
 
         # bus watcher
@@ -276,7 +268,7 @@ class WebRTCSender:
         bus.connect("message", self._on_bus_message)
 
         # IMPORTANT: async link queue -> webrtc sink pad (pads may appear later)
-        GLib.timeout_add(50, self._try_link_queue_to_webrtc)
+        self._link_timer_id = GLib.timeout_add(50, self._try_link_queue_to_webrtc)
 
     def _try_link_queue_to_webrtc(self):
         if self._linked_to_webrtc:
@@ -291,7 +283,7 @@ class WebRTCSender:
             return True
 
 
-        webrtc_sink = self.webrtc.get_request_pad("sink_%u")
+        webrtc_sink = self.webrtc.request_pad_simple("sink_%u")
         if not webrtc_sink:
             print("[sender] idle: could not request webrtc sink pad yet")
             return True
@@ -331,6 +323,37 @@ class WebRTCSender:
                 old, new, pending = msg.parse_state_changed()
                 print(f"[sender] pipeline state: {old.value_nick} -> {new.value_nick}")
 
+    def _reset_webrtc_state(self):
+        self.remote_description_set = False
+        self.pending_remote_candidates.clear()
+        self._offer_started = False
+        self._linked_to_webrtc = False
+        self._q = None
+        self.webrtc = None
+
+    def _destroy_pipeline(self):
+        if self.pipeline:
+            try:
+                bus = self.pipeline.get_bus()
+                if bus:
+                    bus.remove_signal_watch()
+            except Exception:
+                pass
+
+            if self._link_timer_id is not None:
+                GLib.source_remove(self._link_timer_id)
+                self._link_timer_id = None
+
+            self.pipeline.set_state(Gst.State.NULL)
+            self.pipeline = None
+
+    def restart_for_new_viewer(self):
+        print("[sender] restarting sender state for new viewer")
+        self._destroy_pipeline()
+        self._reset_webrtc_state()
+        self.build_pipeline()
+        self.start_pipeline()
+
     def start_pipeline(self):
         assert self.pipeline is not None
         self.pipeline.set_state(Gst.State.PAUSED)
@@ -343,9 +366,13 @@ class WebRTCSender:
         try:
             if self.pipeline:
                 self.pipeline.set_state(Gst.State.NULL)
+                self.pipeline = None
         finally:
             if self.glib_loop.is_running():
                 self.glib_loop.quit()
+
+            if self.async_loop.is_running():
+                self.async_loop.call_soon_threadsafe(self.async_loop.stop)
 
     # ---------- Main run ----------
 
@@ -373,11 +400,14 @@ class WebRTCSender:
                 await self.ws_send({"type": "join", "role": ROLE})
                 print("[sender] joined signaling as sender")
 
-                self.build_pipeline()
-                self.start_pipeline()
-
                 async for raw in ws:
                     data = json.loads(raw)
+
+                    if data.get("type") == "send_offer":
+                        print("[sender] got send_offer from server")
+                        self.restart_for_new_viewer()
+                        continue
+
                     if data.get("type") == "answer":
                         self.set_remote_answer(data["sdp"])
                     elif data.get("type") == "candidate":

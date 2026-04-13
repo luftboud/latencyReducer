@@ -1,6 +1,6 @@
 services:
   server:
-    build: ./server/cpp
+    build: ./server
     container_name: server
     ports:
       - "8080:8080"

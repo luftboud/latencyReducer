@@ -12,22 +12,21 @@ using boost::asio::ip::tcp;
 namespace websocket = boost::beast::websocket;
 namespace json = boost::json;
 
-static std::mutex m;
+static const std::string ASK_OFFER = R"({"type":"send_offer"})";
+static const std::string USER_EXISTS_ERROR = R"({"type":"error","msg":"Cannot join to server. There already is user signed with the same role."})";
 
-std::string server_t::log_participants(const std::string& buf, websocket_type socket) {
+std::string server_t::log_participants(const std::string& buf, const websocket_type& socket) {
     std::lock_guard<std::mutex> lock(m);
-    json::value json_content = json::parse(buf);
+    json::object json_content = json::parse(buf).as_object();
     std::string role;
 
-    if (json_content.as_object()["type"].as_string() == "join" &&
-        json_content.as_object()["role"].as_string() == "sender") {
+    if (json_content["role"].as_string() == "sender" && sender.get_ws() == nullptr) {
         sender.set_ws(socket);
         std::cout << "Sender is logged" << std::endl;
         role = "sender";
     }
 
-    else if (json_content.as_object()["type"].as_string() == "join" &&
-             json_content.as_object()["role"].as_string() == "viewer") {
+    else if (json_content["role"].as_string() == "viewer" && viewer.get_ws() == nullptr) {
         viewer.set_ws(socket);
         std::cout << "Viewer is logged" << std::endl;
         role = "viewer";
@@ -36,20 +35,16 @@ std::string server_t::log_participants(const std::string& buf, websocket_type so
     return role;
 }
 
-void server_t::delete_socket(const std::string &role) {
+void server_t::delete_socket(const std::string &role, const websocket_type& socket) {
     std::lock_guard<std::mutex> lock(m);
-    boost::system::error_code ec;
-    if (role == "sender") {
-        sender.get_ws()->close(websocket::close_code::normal, ec);
+    if (role == "sender" && sender.get_ws() == socket) {
         sender.set_ws(nullptr);
-    }
-    else if (role == "viewer") {
-        viewer.get_ws()->close(websocket::close_code::normal, ec);
+    } else if (role == "viewer" && viewer.get_ws() == socket) {
         viewer.set_ws(nullptr);
     }
 }
 
-void client_worker(websocket_type ws, server_t* server) {
+void client_worker(websocket_type&& ws, server_t* server) {
     std::string curr_role;
     std::cout << "Connected user WS" << std::endl;
     try {
@@ -59,43 +54,58 @@ void client_worker(websocket_type ws, server_t* server) {
             ws->read(buff);
 
             std::string msg = boost::beast::buffers_to_string(buff.data());
-            std::cout << msg << std::endl;
 
-            if (!server->everybody()) {
+            json::object json_content = json::parse(msg).as_object();
+            std::string msg_type = json_content["type"].as_string().c_str();
+
+            if (msg_type == "join") {
                 curr_role = server->log_participants(msg, ws);
+
+                if (curr_role.empty()) {
+                    ws->text(true);
+                    ws->write(boost::asio::buffer(USER_EXISTS_ERROR));
+                    ws->close(websocket::close_code::normal);
+                    return;
+                }
+
+                auto [sender, viewer] = server->get_sockets();
+                if (sender && viewer) {
+                    sender->text(true);
+                    sender->write(boost::asio::buffer(ASK_OFFER));
+                }
                 continue;
             }
 
-            json::value json_content = json::parse(msg);
-            if (json_content.as_object()["type"].as_string() == "offer") {
-                websocket_type viewer = server->get_viewer().get_ws();
+            auto [sender, viewer] = server->get_sockets();
+            if (!(sender && viewer)) continue;
+
+            if (msg_type == "offer") {
                 viewer->text(true);
                 viewer->write(boost::asio::buffer(msg));
             }
 
-            else if (json_content.as_object()["type"].as_string() == "answer") {
-                websocket_type sender = server->get_sender().get_ws();
+            else if (msg_type == "answer") {
                 sender->text(true);
                 sender->write(boost::asio::buffer(msg));
             }
 
-            else if (curr_role == "viewer" && json_content.as_object()["type"].as_string() == "candidate") {
-                websocket_type sender = server->get_sender().get_ws();
+            else if (curr_role == "viewer" && msg_type == "candidate") {
                 sender->text(true);
                 sender->write(boost::asio::buffer(msg));
             }
 
-            else if (curr_role == "sender" && json_content.as_object()["type"].as_string() == "candidate") {
-                websocket_type viewer = server->get_viewer().get_ws();
+            else if (curr_role == "sender" && msg_type == "candidate") {
                 viewer->text(true);
                 viewer->write(boost::asio::buffer(msg));
             }
 
         }
     } catch (const boost::system::system_error& e) {
-        if (e.code() == websocket::error::closed) {
+        server->delete_socket(curr_role, ws);
+
+        if (e.code() == websocket::error::closed ||
+            e.code() == boost::asio::error::connection_aborted) {
             std::cout << "Client closed websocket\n";
-            server->delete_socket(curr_role);
             return;
         }
         std::cerr << "WS error: " << e.code() << " " << e.what() << "\n";
@@ -116,7 +126,7 @@ void server_t::launch() {
             std::cout << "Connected user TCP" << std::endl;
 
             auto ws = std::make_shared<websocket::stream<tcp::socket>>(std::move(socket));
-            std::thread(client_worker, ws, this).detach();
+            std::thread(client_worker, std::move(ws), this).detach();
         }
     } catch (const std::exception& e) {
         std::cerr << "Error occurred: " << e.what() << std::endl;
