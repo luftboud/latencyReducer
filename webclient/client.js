@@ -86,7 +86,7 @@ function createPeerConnection() {
           } catch (e) {
             log("Stats error:", e);
           }
-        }, 60000);
+        }, 18000);
     } else if (peerConnection.connectionState === "failed") {
       log("Connection failed, restarting...");
       stop();
