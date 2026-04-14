@@ -1,6 +1,13 @@
 /*
 Server-client integration
 */
+import {processNetworkStats,
+  processVideoStats,
+  logStatistics,
+  getStatisticsLog,
+  saveToCSV,
+  resetStatistics} from "./statistics.js";
+
 
 const videoElement = document.getElementById("video");
 const startBtn = document.getElementById("startBtn");
@@ -56,16 +63,13 @@ function createPeerConnection() {
 
   // creating peer connection
   peerConnection = new RTCPeerConnection({
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-    sdpSemantics: "unified-plan",
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
   });
 
   console.log("Connection with Server was established");
 
   // for info on ICE connections
   peerConnection.oniceconnectionstatechange = () => {
-    log("iceConnectionState =", peerConnection.iceConnectionState);
-
     if (peerConnection.iceConnectionState === "failed") {
       log("IceConnection failed, restarting...");
       stop();
@@ -74,12 +78,15 @@ function createPeerConnection() {
 
   // for info on overall RTCPeerConnection state
   peerConnection.onconnectionstatechange = () => {
-    log("connectionState =", peerConnection.connectionState);
-
     if (peerConnection.connectionState === "connected") {
       if (statsTimer) clearInterval(statsTimer);
-      statsTimer = setInterval(getStats, 6000);
-      getStats();
+        statsTimer = setInterval(async () => {
+          try {
+            await getStats();
+          } catch (e) {
+            log("Stats error:", e);
+          }
+        }, 6000);
     } else if (peerConnection.connectionState === "failed") {
       log("Connection failed, restarting...");
       stop();
@@ -96,7 +103,6 @@ function createPeerConnection() {
       log("ICE gathering finished");
       return;
     }
-    log("local ICE candidate:", event.candidate.candidate);
 
     if (websocketSignal && websocketSignal.readyState === WebSocket.OPEN) {
       websocketSignal.send(
@@ -106,7 +112,6 @@ function createPeerConnection() {
         }),
       );
 
-      log("send ICE candidate");
     }
   };
 
@@ -128,11 +133,8 @@ function createPeerConnection() {
 async function handleOffer(offer) {
   // waiting for the offer from the server
   await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-  log("offer from server was received");
 
   if (pendingRemoteCandidates.length > 0) {
-    log("flushing pending candidates:", pendingRemoteCandidates.length);
-
     for (const c of pendingRemoteCandidates) {
       try {
         await peerConnection.addIceCandidate(c);
@@ -145,8 +147,6 @@ async function handleOffer(offer) {
 
   const answerServer = await peerConnection.createAnswer();
   await peerConnection.setLocalDescription(answerServer);
-  log("answer from the browser to server set");
-
   // sends answer to server
   websocketSignal.send(
     JSON.stringify({
@@ -167,7 +167,6 @@ async function addRemoteCandidate(candidate) {
 
   try {
     await peerConnection.addIceCandidate(candidate);
-    log("addIceCandidate OK");
   } catch (e) {
     log("addIceCandidate FAILED:", e);
   }
@@ -230,41 +229,12 @@ function connectWebSocket() {
 }
 
 async function getStats() {
+  if (!peerConnection) return;
   const stats = await peerConnection.getStats();
-  stats.forEach((report) => {
-    if (report.type === "candidate-pair") {
-      if (report.state === "succeeded") {
-        console.log("Candidate-pair report statistics:");
-        const currRoundTripTime = report.currentRoundTripTime * 1000;
-        const bytesReceived = report.bytesReceived;
-
-        console.log(
-          ` Time spent on sending request & receiving information back: ${currRoundTripTime} ms \n Bytes received: ${bytesReceived}`,
-        );
-      }
-    } else if (report.type === "inbound-rtp") {
-      if (report.kind === "video") {
-        console.log("Received video report statistics:");
-        let packetsLost = report.packetsLost;
-        let framesPerSecond = report.framesPerSecond;
-        let framesDropped = report.framesDropped;
-        let framesDecoded = report.framesDecoded;
-
-        let bufferDelay = report.jitterBufferDelay * 1000;
-        let bufferMinDelay = report.jitterBufferMinimumDelay * 1000;
-        let totalDecodeTime = report.totalDecodeTime * 1000;
-
-        let frameDecodeTime =
-          framesDecoded > 0 ? totalDecodeTime / framesDecoded : 0;
-        let avgBufferDelay =
-          framesDecoded > 0 ? bufferDelay / framesDecoded : 0;
-
-        console.log(
-          ` Frames per second: ${framesPerSecond} \n Number of lost packets: ${packetsLost} \n Number of dropped frames: ${framesDropped} \n Number of all decoded frames: ${framesDecoded} \n Awaiting of a buffer to make a complete video: ${bufferDelay.toFixed(2)} ms \n Average buffer delay per frame: ${avgBufferDelay.toFixed(2)} ms \n The smallest delay of a buffer making video: ${bufferMinDelay.toFixed(2)} ms \n Total time taken for decoding: ${totalDecodeTime.toFixed(2)} ms \n Time taken for decoding 1 frame: ${frameDecodeTime.toFixed(2)} ms`,
-        );
-      }
-    }
-  });
+  const networkStats = processNetworkStats(stats);
+  const videoStats = processVideoStats(stats);
+  logStatistics(networkStats, videoStats);
+  log(networkStats, videoStats);
 }
 
 function start() {
@@ -284,8 +254,8 @@ function stop() {
   if (!videoControlsStart) return;
   videoControlsStart = false;
   controlsStarter(false);
-  log("STOP clicked");
   videoElement.srcObject = null;
+
 
   if (peerConnection) {
     peerConnection.ontrack = null;
@@ -302,9 +272,13 @@ function stop() {
   }
 
   if (statsTimer) {
-    clearInterval(statsInterval);
-    statsInterval = null;
+    clearInterval(statsTimer);
+    statsTimer = null;
     log("Stopped saving statistics");
+    if (getStatisticsLog().length > 0) {
+      saveToCSV();
+    }
+    resetStatistics();
   }
 }
 
