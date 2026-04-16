@@ -21,7 +21,7 @@ ROLE = "sender"
 def has_element(name: str) -> bool:
     return Gst.ElementFactory.find(name) is not None
 
-def _on_rtsp_pad_added(self, _src: Gst.Element, pad: Gst.Pad, depay: Gst.Element):
+def _on_rtsp_pad_added(_src: Gst.Element, pad: Gst.Pad, depay: Gst.Element):
     """
     rtspsrc creates pads dynamically.
     Waits for video RTP pad and then link it to rtph264depay.
