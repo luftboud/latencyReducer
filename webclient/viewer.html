@@ -9,13 +9,19 @@
 <body>
     <div class="app">
         <video id="video" autoplay playsinline muted></video>
-
         <div class="app-controls">
-            <button id="startBtn" class="app-controls-button">Start</button>
-            <button id="stopBtn" class="app-controls-button" disabled>Stop</button>
+            <div class="app-controls-ip" id="controlsIP">
+                <input id="input-ip" class="app-input" placeholder="Type an IP of camera" maxlength="14">
+                <button id="sendBtn" class="app-controls-button">Send</button>
+                <p id="errorIp" class="app-controls-error"></p>s
+            </div>
+            <div class="app-controls-btns" id="controlsBtn">
+                <button id="startBtn" class="app-controls-button">Start</button>
+                <button id="stopBtn" class="app-controls-button" disabled>Stop</button>
+            </div>
         </div>
     </div>
     <pre id="log"></pre>
-    <script src="./client.js"></script>
+    <script src="./client.js" type="module"></script>
 </body>
 </html>
