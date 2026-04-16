@@ -21,8 +21,7 @@ ROLE = "sender"
 def has_element(name: str) -> bool:
     return Gst.ElementFactory.find(name) is not None
 
-
-def _on_rtsp_pad_added(pad: Gst.Pad, depay: Gst.Element):
+def _on_rtsp_pad_added(self, _src: Gst.Element, pad: Gst.Pad, depay: Gst.Element):
     """
     rtspsrc creates pads dynamically.
     Waits for video RTP pad and then link it to rtph264depay.
@@ -122,7 +121,7 @@ class WebRTCSender:
             self.async_loop
         )
 
-    def _on_ice_candidate(self, mlineindex: int, candidate: str):
+    def _on_ice_candidate(self, _webrtc, mlineindex: int, candidate: str):
         if not candidate:
             print("[sender] ICE gathering finished (empty candidate) – ignoring")
             return
