@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 import threading
+import time
 from typing import Optional
 
 import gi
@@ -88,6 +89,63 @@ class WebRTCSender:
         self._offer_started = False
         self._link_timer_id = None
 
+        # metrics
+        self.t0 = time.perf_counter()
+        self.events = {}
+        self.first_local_ice_seen = False
+        self.first_rtp_seen = False
+
+    def mark(self, name: str):
+        dt_ms = (time.perf_counter() - self.t0) * 1000
+        self.events[name] = dt_ms
+        print(f"[METRIC] {name}: {dt_ms:.2f} ms")
+
+    def reset_metrics(self):
+        self.t0 = time.perf_counter()
+        self.events = {}
+        self.first_local_ice_seen = False
+        self.first_rtp_seen = False
+
+    def print_summary(self):
+        print("\n========== SENDER METRICS ==========")
+        for key, value in self.events.items():
+            print(f"{key:30s} {value:10.2f} ms")
+
+        def diff(a, b):
+            if a in self.events and b in self.events:
+                print(f"{a} -> {b:20s} {self.events[b] - self.events[a]:10.2f} ms")
+
+        print("\n---------- DELTAS ----------")
+        diff("ws_connected", "send_offer_received")
+        diff("send_offer_received", "pipeline_playing")
+        diff("send_offer_received", "offer_created")
+        diff("offer_created", "offer_sent")
+        diff("offer_sent", "answer_received")
+        diff("first_local_ice", "ice_connected")
+        diff("pipeline_playing", "first_rtp_buffer_sent")
+        diff("send_offer_received", "ice_connected")
+        diff("send_offer_received", "first_rtp_buffer_sent")
+        print("====================================\n")
+
+    def _on_webrtc_state_notify(self, element, pspec):
+        try:
+            value = element.get_property(pspec.name)
+            value_str = getattr(value, "value_nick", str(value))
+            print(f"[WEBRTC] {pspec.name}: {value_str}")
+
+            if pspec.name == "ice-connection-state" and value_str in ("connected", "completed"):
+                if "ice_connected" not in self.events:
+                    self.mark("ice_connected")
+                    self.print_summary()
+        except Exception as e:
+            print(f"[sender] failed to read {pspec.name}: {e}", file=sys.stderr)
+
+    def _on_rtp_buffer_probe(self, pad, info):
+        if not self.first_rtp_seen:
+            self.first_rtp_seen = True
+            self.mark("first_rtp_buffer_sent")
+        return Gst.PadProbeReturn.OK
+
     def _run_async_loop(self):
         """
         Function to set self.async_loop as active event loop
@@ -115,13 +173,19 @@ class WebRTCSender:
         element.emit("set-local-description", offer, Gst.Promise.new())
 
         sdp_text = offer.sdp.as_text()
+        self.mark("offer_created")
         print("[sender] offer created, sending to signaling")
+        self.mark("offer_sent")
         asyncio.run_coroutine_threadsafe(
             self.ws_send({"type": "offer", "sdp": sdp_text}),
             self.async_loop
         )
 
     def _on_ice_candidate(self, _webrtc, mlineindex: int, candidate: str):
+        if not self.first_local_ice_seen and candidate:
+            self.first_local_ice_seen = True
+            self.mark("first_local_ice")
+
         if not candidate:
             print("[sender] ICE gathering finished (empty candidate) – ignoring")
             return
@@ -163,7 +227,7 @@ class WebRTCSender:
 
     def add_remote_candidate(self, cand_obj: dict):
         if self.webrtc is None:
-            print("[sender] got remote answer but webrtc is not ready", file=sys.stderr)
+            print("[sender] got remote candidate but webrtc is not ready", file=sys.stderr)
             return
         if not self.remote_description_set:
             print("[sender] buffering remote ICE (remote description not set yet)")
@@ -203,21 +267,21 @@ class WebRTCSender:
         h264parse = Gst.ElementFactory.make("h264parse", "h264parse")
         if not h264parse:
             raise RuntimeError("Failed to create h264parse")
-        h264parse.set_property("config-interval", 1) # puts SPS/PPS periodically so decoder starts normally
+        h264parse.set_property("config-interval", 1)
 
-        pay = Gst.ElementFactory.make("rtph264pay", "pay") # payloader for standard packing to RTP
+        pay = Gst.ElementFactory.make("rtph264pay", "pay")
         if not pay:
             raise RuntimeError("Failed to create rtph264pay")
         pay.set_property("pt", 96)
         pay.set_property("config-interval", 1)
 
-        rtpcaps = Gst.ElementFactory.make("capsfilter", "rtpcaps") # makes stream explicitly RTP-video-H264
+        rtpcaps = Gst.ElementFactory.make("capsfilter", "rtpcaps")
         if not rtpcaps:
             raise RuntimeError("Failed to create capsfilter (rtpcaps)")
         rtp_caps_str = "application/x-rtp,media=video,encoding-name=H264,payload=96"
         rtpcaps.set_property("caps", Gst.Caps.from_string(rtp_caps_str))
 
-        q = Gst.ElementFactory.make("queue", "q") # bufer
+        q = Gst.ElementFactory.make("queue", "q")
         if not q:
             raise RuntimeError("Failed to create queue")
 
@@ -226,14 +290,16 @@ class WebRTCSender:
         if not self.webrtc:
             raise RuntimeError("Failed to create webrtcbin (check gst-plugins-bad/webrtc).")
 
-        self.webrtc.set_property("bundle-policy", "max-bundle") #5-tuple
-
-        # stun so is not localhost-only
+        self.webrtc.set_property("bundle-policy", "max-bundle")
         self.webrtc.set_property("stun-server", "stun://stun.l.google.com:19302")
 
         # tell webrtcbin we will SENDONLY video with these RTP caps
         caps = Gst.Caps.from_string(rtp_caps_str)
-        self.webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
+        self.webrtc.emit(
+            "add-transceiver",
+            GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY,
+            caps
+        )
 
         # ---- add to pipeline ----
         for e in (src, depay, h264parse, pay, rtpcaps, q, self.webrtc):
@@ -253,7 +319,10 @@ class WebRTCSender:
         must_link(pay, rtpcaps, "pay->rtpcaps")
         must_link(rtpcaps, q, "rtpcaps->queue")
 
-        # store queue for async-link
+        pay_src_pad = pay.get_static_pad("src")
+        if pay_src_pad:
+            pay_src_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_rtp_buffer_probe)
+
         self._q = q
         self._linked_to_webrtc = False
 
@@ -262,6 +331,10 @@ class WebRTCSender:
 
         # connect signals
         self.webrtc.connect("on-ice-candidate", self._on_ice_candidate)
+        self.webrtc.connect("notify::signaling-state", self._on_webrtc_state_notify)
+        self.webrtc.connect("notify::ice-gathering-state", self._on_webrtc_state_notify)
+        self.webrtc.connect("notify::ice-connection-state", self._on_webrtc_state_notify)
+        self.webrtc.connect("notify::connection-state", self._on_webrtc_state_notify)
 
         # bus watcher
         bus = self.pipeline.get_bus()
@@ -296,6 +369,7 @@ class WebRTCSender:
             self._linked_to_webrtc = True
             print("[sender] queue linked to webrtc; switching pipeline to PLAYING")
             self.pipeline.set_state(Gst.State.PLAYING)
+            self.mark("pipeline_playing")
 
             # kick negotiation now (in case negotiation-needed fired earlier)
             if not self._offer_started:
@@ -307,6 +381,7 @@ class WebRTCSender:
             return False
 
         return True
+
     def _on_bus_message(self, _bus, msg: Gst.Message):
         """
         To get messages on the certain bus
@@ -398,6 +473,8 @@ class WebRTCSender:
         try:
             async with websockets.connect(WS_URL) as ws:
                 self.ws = ws
+                self.mark("ws_connected")
+
                 await self.ws_send({"type": "join", "role": ROLE})
                 print("[sender] joined signaling as sender")
 
@@ -405,6 +482,8 @@ class WebRTCSender:
                     data = json.loads(raw)
 
                     if data.get("type") == "send_offer":
+                        self.reset_metrics()
+                        self.mark("send_offer_received")
                         print("[sender] got send_offer from server")
                         self.restart_for_new_viewer()
                         continue
