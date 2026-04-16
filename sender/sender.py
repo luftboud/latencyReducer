@@ -21,6 +21,35 @@ ROLE = "sender"
 def has_element(name: str) -> bool:
     return Gst.ElementFactory.find(name) is not None
 
+def _on_rtsp_pad_added(_src: Gst.Element, pad: Gst.Pad, depay: Gst.Element):
+    """
+    rtspsrc creates pads dynamically.
+    Waits for video RTP pad and then link it to rtph264depay.
+    """
+    caps = pad.get_current_caps()
+    if not caps:
+        caps = pad.query_caps(None)
+    caps_str = caps.to_string() if caps else ""
+    print(f"[sender] rtspsrc pad-added: {caps_str}")
+
+    # H.264 RTP video
+    if "application/x-rtp" not in caps_str or "media=(string)video" not in caps_str:
+        print("[sender] ignoring non-video RTP pad")
+        return
+
+    sink_pad = depay.get_static_pad("sink")
+    if not sink_pad:
+        print("[sender] ERROR: depay sink pad not found", file=sys.stderr)
+        return
+
+    if sink_pad.is_linked():
+        print("[sender] depay sink already linked")
+        return
+
+    res = pad.link(sink_pad)
+    print(f"[sender] rtsp src pad -> depay: {res.value_nick}")
+
+
 class WebRTCSender:
     def __init__(self):
         """
@@ -92,7 +121,7 @@ class WebRTCSender:
             self.async_loop
         )
 
-    def _on_ice_candidate(self, mlineindex: int, candidate: str):
+    def _on_ice_candidate(self, _webrtc, mlineindex: int, candidate: str):
         if not candidate:
             print("[sender] ICE gathering finished (empty candidate) – ignoring")
             return
@@ -144,39 +173,11 @@ class WebRTCSender:
 
     # ---------- Pipeline ----------
 
-    def _on_rtsp_pad_added(self, src: Gst.Element, pad: Gst.Pad, depay: Gst.Element):
-        """
-        rtspsrc creates pads dynamically.
-        Waits for video RTP pad and then link it to rtph264depay.
-        """
-        caps = pad.get_current_caps()
-        if not caps:
-            caps = pad.query_caps(None)
-        caps_str = caps.to_string() if caps else ""
-        print(f"[sender] rtspsrc pad-added: {caps_str}")
-
-        # H.264 RTP video
-        if "application/x-rtp" not in caps_str or "media=(string)video" not in caps_str:
-            print("[sender] ignoring non-video RTP pad")
-            return
-
-        sink_pad = depay.get_static_pad("sink")
-        if not sink_pad:
-            print("[sender] ERROR: depay sink pad not found", file=sys.stderr)
-            return
-
-        if sink_pad.is_linked():
-            print("[sender] depay sink already linked")
-            return
-
-        res = pad.link(sink_pad)
-        print(f"[sender] rtsp src pad -> depay: {res.value_nick}")
-
     def build_pipeline(self):
         """
         Building video pipeline that will be sent to signaling server.
         """
-        RTSP_URL = (
+        rtsp_url = (
             "rtsp://admin:iloveacs2026@192.168.1.150:554/cam/realmonitor?channel=1&subtype=1"
         )
         print("[sender] building RTSP -> WebRTC pipeline")
@@ -190,7 +191,7 @@ class WebRTCSender:
         src = Gst.ElementFactory.make("rtspsrc", "src")
         if not src:
             raise RuntimeError("Failed to create rtspsrc (check gst-plugins-good).")
-        src.set_property("location", RTSP_URL)
+        src.set_property("location", rtsp_url)
         src.set_property("latency", 100)
         src.set_property("protocols", "tcp")
 
@@ -257,7 +258,7 @@ class WebRTCSender:
         self._linked_to_webrtc = False
 
         # rtspsrc has dynamic pads -> connect callback
-        src.connect("pad-added", self._on_rtsp_pad_added, depay)
+        src.connect("pad-added", _on_rtsp_pad_added, depay)
 
         # connect signals
         self.webrtc.connect("on-ice-candidate", self._on_ice_candidate)
@@ -306,7 +307,7 @@ class WebRTCSender:
             return False
 
         return True
-    def _on_bus_message(self, msg: Gst.Message):
+    def _on_bus_message(self, _bus, msg: Gst.Message):
         """
         To get messages on the certain bus
         """
