@@ -1,5 +1,4 @@
 #include <iostream>
-#include <mutex>
 #include <boost/asio.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/core.hpp>
@@ -16,7 +15,7 @@ static const std::string ASK_OFFER = R"({"type":"send_offer"})";
 static const std::string USER_EXISTS_ERROR = R"({"type":"error","msg":"Cannot join to server. There already is user signed with the same role."})";
 
 std::string server_t::log_participants(const std::string& buf, const websocket_type& socket) {
-    std::lock_guard<std::mutex> lock(m);
+    std::lock_guard lock(m);
     json::object json_content = json::parse(buf).as_object();
     std::string role;
 
@@ -36,7 +35,7 @@ std::string server_t::log_participants(const std::string& buf, const websocket_t
 }
 
 void server_t::delete_socket(const std::string &role, const websocket_type& socket) {
-    std::lock_guard<std::mutex> lock(m);
+    std::lock_guard lock(m);
     if (role == "sender" && sender.get_ws() == socket) {
         sender.set_ws(nullptr);
     } else if (role == "viewer" && viewer.get_ws() == socket) {
@@ -44,12 +43,12 @@ void server_t::delete_socket(const std::string &role, const websocket_type& sock
     }
 }
 
-void client_worker(websocket_type&& ws, server_t* server) {
+void server_t::client_worker(websocket_type&& ws) {
     std::string curr_role;
     std::cout << "Connected user WS" << std::endl;
     try {
         ws->accept();
-        while (true) {
+        while (run.load()) {
             boost::beast::flat_buffer buff;
             ws->read(buff);
 
@@ -59,7 +58,7 @@ void client_worker(websocket_type&& ws, server_t* server) {
             std::string msg_type = json_content["type"].as_string().c_str();
 
             if (msg_type == "join") {
-                curr_role = server->log_participants(msg, ws);
+                curr_role = log_participants(msg, ws);
 
                 if (curr_role.empty()) {
                     ws->text(true);
@@ -68,7 +67,7 @@ void client_worker(websocket_type&& ws, server_t* server) {
                     return;
                 }
 
-                auto [sender, viewer] = server->get_sockets();
+                auto [sender, viewer] = get_sockets();
                 if (sender && viewer) {
                     sender->text(true);
                     sender->write(boost::asio::buffer(ASK_OFFER));
@@ -76,7 +75,7 @@ void client_worker(websocket_type&& ws, server_t* server) {
                 continue;
             }
 
-            auto [sender, viewer] = server->get_sockets();
+            auto [sender, viewer] = get_sockets();
             if (!(sender && viewer)) continue;
 
             if (msg_type == "offer") {
@@ -101,7 +100,7 @@ void client_worker(websocket_type&& ws, server_t* server) {
 
         }
     } catch (const boost::system::system_error& e) {
-        server->delete_socket(curr_role, ws);
+        delete_socket(curr_role, ws);
 
         if (e.code() == websocket::error::closed ||
             e.code() == boost::asio::error::connection_aborted) {
@@ -120,15 +119,40 @@ void server_t::launch() {
 
     try {
         std::cout << "Listening...\n" << std::endl;
-        while (true) {
+        while (run.load()) {
             tcp::socket socket(io);
             acceptor.accept(socket);
             std::cout << "Connected user TCP" << std::endl;
 
             auto ws = std::make_shared<websocket::stream<tcp::socket>>(std::move(socket));
-            std::thread(client_worker, std::move(ws), this).detach();
+            threads.emplace_back([this, ws = std::move(ws)]() mutable {
+                client_worker(std::move(ws));
+            });
         }
     } catch (const std::exception& e) {
         std::cerr << "Error occurred: " << e.what() << std::endl;
     }
+}
+
+void server_t::stop() {
+    run.store(false);
+
+    {
+        std::lock_guard lg(m);
+
+        if (sender.get_ws()) {
+            sender.get_ws()->close(websocket::close_code::normal);
+            sender.set_ws(nullptr);
+        }
+
+        if (viewer.get_ws()) {
+            viewer.get_ws()->close(websocket::close_code::normal);
+            viewer.set_ws(nullptr);
+        }
+    }
+
+    for (auto& th: threads) {
+        if (th.joinable()) th.join();
+    }
+    threads.clear();
 }

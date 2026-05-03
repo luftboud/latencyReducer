@@ -1,15 +1,25 @@
 #include <iostream>
+#include <optional>
 
 #include "server.h"
 
 int main(int argc, char** argv) {
-    server_t s;
+    std::optional<server_t> s;
 
-    if (argc == 3) {
-        std::string addr = argv[1];
-        int port = std::stoi(argv[2]);
+    try {
+        if (argc >= 3) {
+            std::string addr = argv[1];
+            int port = std::stoi(argv[2]);
+            s.emplace(std::move(addr), port);
+        } else s.emplace();
+
+        s->launch();
+        s->stop();
+
+    } catch (const std::exception& e) {
+        std::cerr << "Server error: " << e.what() << std::endl;
+        s->stop();
+        return 1;
     }
-
-    s.launch();
     return 0;
 }
